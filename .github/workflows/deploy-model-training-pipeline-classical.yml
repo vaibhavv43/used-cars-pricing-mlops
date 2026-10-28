@@ -1,0 +1,70 @@
+name: deploy-model-training-pipeline
+
+# Runs on every push or pull request to main (the CI/CD trigger),
+# and can also be started by hand from the Actions tab ("Run workflow").
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # 1. Read resource group and workspace name from config-infra-prod.yml
+  get-config:
+      uses: Azure/mlops-templates/.github/workflows/read-yaml.yml@main
+      with:
+        file_name: config-infra-prod.yml
+
+  # 2. Make sure the compute cluster the pipeline runs on exists
+  create-compute:
+      needs: get-config
+      uses: ./.github/workflows/custom-create-compute.yml
+      with:
+        cluster_name: cpu-cluster
+        size: Standard_DS11_v2
+        min_instances: 0
+        max_instances: 1
+        cluster_tier: dedicated
+        resource_group: ${{ needs.get-config.outputs.resource_group }}
+        workspace_name: ${{ needs.get-config.outputs.aml_workspace }}
+      secrets:
+          creds: ${{secrets.AZURE_CREDENTIALS}}
+
+  # 3. Register data/used_cars.csv as a new version of the used-cars-data asset
+  register-dataset:
+    needs: get-config
+    uses: ./.github/workflows/custom-register-dataset.yml
+    with:
+      resource_group: ${{ needs.get-config.outputs.resource_group }}
+      workspace_name: ${{ needs.get-config.outputs.aml_workspace }}
+      name: used-cars-data
+      data_file: mlops/azureml/train/data.yml
+    secrets:
+      creds: ${{secrets.AZURE_CREDENTIALS}}
+
+  # 4. Register the training environment (base image + conda packages)
+  register-environment:
+      needs: get-config
+      uses: ./.github/workflows/custom-register-environment.yml
+      with:
+        resource_group: ${{ needs.get-config.outputs.resource_group }}
+        workspace_name: ${{ needs.get-config.outputs.aml_workspace }}
+        environment_file:  mlops/azureml/train/train-env.yml
+        conda_file: data-science/environment/train-conda.yml
+      secrets:
+          creds: ${{secrets.AZURE_CREDENTIALS}}
+
+  # 5. Submit prep -> sweep -> register pipeline and wait for it to finish
+  run-pipeline:
+      needs: [get-config, register-environment, create-compute, register-dataset]
+      uses: ./.github/workflows/custom-run-pipeline.yml
+      with:
+        resource_group: ${{ needs.get-config.outputs.resource_group }}
+        workspace_name: ${{ needs.get-config.outputs.aml_workspace }}
+        parameters-file:  mlops/azureml/train/newpipeline.yml
+        job-name: mlops-pipeline
+      secrets:
+          creds: ${{secrets.AZURE_CREDENTIALS}}
